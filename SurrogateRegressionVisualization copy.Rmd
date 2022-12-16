@@ -1,0 +1,475 @@
+---
+title: "Surrograte Regression Visualization"
+author: "Sydney Purdue"
+date: "2022-12-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(tidyverse)
+library(readr)
+library(e1071)
+library(randomForest)
+library(earth)
+library(caret)
+library(vip)
+#library(pdp)
+library(plotmo)
+library(rms)
+```
+
+_____________
+
+#### Problem Statement & Motivation
+##### What is the problem you want to solve? Why is it a relevant and interesting problem?
+
+I want to examine regression as a surrogate modeling technique, and through this, explore multivariable regression visualization. 
+
+Regression has been under-explored for surrogate modeling in visualization, making this an interesting task for interpretability and explainability for complicated regression models or models that may be inaccessible. This may be due to a general lack of visualization techniques for regression models beyond 2 or 3 dimensions. For this reason, I think it would be interesting to explore additional regression visualization techniques as a part of this project.
+
+_____________
+
+#### Related work 
+##### What have others done in this space? What are related approaches and solutions?
+
+###### **Surrogate Regression Technique**
+
+There isn't much on regression as a surrogate technique for machine learning models. There is a fair amount on regression surrogate models for other fields of science, but from examining this work, as best as I can tell, it doesn't apply to the scenario I'm working on here.
+
+Linear regression on its own is a powerful technique, but more complicated models can obviously outperform it for tasks that are far more complex and nonlinear. It is, however, easily explainable, making it a very good contender for a surrogate model where you may be trying to help interpret a very complicated model for users with limited knowledge of machine learning techniques. Because I wanted to get a better fit than a multivariable linear regression, I looked into the idea of a piecewise regression. While piecewise regressions do exist, what I wanted had already been created in the Multivariate Adaptive Regression Splines (MARS) technique. MARS was introduced by Jerome H Friedman in 1991 (and interestingly, the term MARS is trademarked by a company owned by Minitab, so a lot of packages for it call themselves "Earth" instead, which I think is amusing).
+
+MARS is a technique for introducing splines into a linear regression, or essentially finding knot points where the data would change to be better represented by a different slope. The technique uses a hinge function to determine these knots, and the process of building a MARS model has two parts: a forward pass and a backward pass. The forward pass looks at all the existing terms, all the the variables to pick one for a new basis function, and all the values of all the variables to find new knots. Once the error is too small or the maximum number of terms (specified by the user) are reached, the model does a backward pass to prune the model and cut down on the overfitting from the forward pass using generalized cross-validation. It handles continuous and categorical data, it's relatively quick, and it can handle relatively large datasets. It is non-differentiable, but for these purposes, I don't need that property.
+
+I looked into several additional common modifications of linear regressions, but none of them maintained quite the level of direct interpretability as MARS. Because GAMs involve functions of different degrees, they are going to be less interpretable than a linear coefficient, even if they may be more accurate. Because this is intended as an exploration of surrogate regressions, I accepted the tradeoff of reduced accuracy for increased interpretability.
+
+###### **Visualization Technique**
+
+Because this is a visualization class, obviously I also need to visualize these models. Here is where the stranger problem exists: there are very few techniques for visualizing multiple linear regressions beyond 2 independent variables. For a model beyond $y = \beta_{0} + \beta_{1}X_{1} + \beta_{2}X_{2}$, we run into problems. With 1 independent variable ($y = \beta_{0} + \beta_{1}X$), this simple linear regression can be easily represented in 2D with a scatterplot. With 2 independent variables, we get to 3D scatterplots with planes or hard-to-conceptualize lines, so this is our maximum for this technique without any kind of faceting/animation/interaction. Beyond this, the most common visualization for multiple linear regressions is a faceted visualization of simple regressions where each other term is held equal to 0 to isolate the linear trend of the individual variable. 
+
+While this kind of isolation is obviously useful, it isn't very realistic and doesn't necessarily show any kind of interaction between variables. I was able to find some visualizations playing around with introducing multiple kinds of encodings via color and faceting to show more features in one plot. You can find those examples [here](https://cran.r-project.org/web/packages/ggiraphExtra/vignettes/ggPredict.html). This idea intrigued me, and you can see some explorations in the results section.
+
+As I was exploring these ideas, I found nomograms (or nomographs) as a possible solution to this kind of visualization. Nomograms are graphical calculation devices, used to provide quick, accurate (to a point), visual calculations of complicated formulas for engineers or other professionals, and they can be used with no knowledge of the underlying function. Invented in 1880, they were particularly useful prior to calculators being widely available. However, depending on their design, some may have their underlying computational structure evident in their form. Usually, you draw a line between two known values, and the index line (isopleth line) intersects a third axis, where you can read off the answer to your equation.
+
+There exists a package in R called DynNom, which creates a Shiny app to dynamically visualize the results of a nomogram. In general, I wasn't super impressed with this package, as it takes away some of the inherent properties of the nomogram that make it useful for what I'm interested in with this project. You can find an explanation of the project [here](https://www.r-bloggers.com/2017/04/generating-dynamic-nomograms-using-dynnom/) and see a sample of their app with the Titanic dataset [here](https://amir.shinyapps.io/titanic/). The paper can be found [here](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0225253).
+
+There is also a function available for creating nomograms in the rms package.
+
+_____________
+
+#### Solution
+##### What is your proposed solution? How does it work?
+
+###### **Summary**
+Specifically for the surrogate modeling, in order to get better performance from linear regression techniques, I'm using MARS to get better fits from regression lines while maintaining the interpretability of linear regression models. 
+
+For the visualization component, I'm exploring visualizations of multiple linear regressions using different layers of data encodings, and I'm also exploring nomograms as a visualization/interpretability technique for linear regressions.
+
+I'm combining these two ideas by incorporating MARS into nomograms, presented alongside their formulations.
+
+###### **Implementation & Setup**
+
+```{r Dataset and Investigation}
+boston <- read_csv("boston.csv")
+
+boston.adj <- boston %>% 
+  mutate(id = 1:nrow(boston))
+
+summary(boston.adj)
+
+pairs(boston.adj)
+
+correlationMatrix <- cor(boston)
+correlationMatrix
+```
+
+This data is pretty clean for these purposes, and relatively small, meaning it will be easier to work with and the models run quickly, which is just helpful. Generally, because of the correlations, I'm going to be pulling INDUS, AGE, and TAX from the linear models and models for comparison. Not all of the data is distributed fantastically, but it's generally not *too* terrible. 
+
+```{r Split Data}
+set.seed(497562)
+train <- boston.adj %>% sample_frac(0.7)
+test <- anti_join(boston.adj, train, by = "id")
+
+summary(train$MEDV)
+summary(test$MEDV)
+```
+
+```{r Make An Arbitrarily Complex Model}
+RFModel <- randomForest(MEDV~.-id, data=train, importance=T, proximity=T) 
+print(RFModel)
+
+RFModel.simple <- randomForest(MEDV~LSTAT, data=train, importance=T, proximity=T) 
+print(RFModel.simple)
+```
+
+Fit is decent for no clean-up, feature selection, etc. And as expected, the simpler model is much worse, but still above 50% explained, so it's doing something.
+
+###### **Regression Visualization Techniques, General**
+
+```{r Regression Visualization: Setup}
+LM.simple <- lm(MEDV ~ LSTAT, data = train)
+summary(LM.simple)
+ggplot(data = train, aes(x = LSTAT, y = MEDV)) + geom_point() + geom_smooth(method = "lm", se = F) + theme_minimal()
+
+LM.simpleLog <- lm(MEDV ~ log(LSTAT), data = train)
+summary(LM.simpleLog)
+ggplot(data = train, aes(x = log(LSTAT), y = MEDV)) + geom_point() + geom_smooth(method = "lm", se = F) + theme_minimal()
+
+LM.full <- lm(MEDV ~ .-id-INDUS-AGE-TAX, data = train)
+summary(LM.full)
+
+LM.simple2var <- lm(MEDV ~ LSTAT + RM, data = train)
+summary(LM.simple2var)
+ggplot(data = train, aes(x = LSTAT, y = MEDV)) + geom_point() + geom_smooth(method = "lm", se = F) + theme_minimal()
+```
+
+From some initial setup, I was able to recreate the visualization I saw that used alternate encodings beyond x and y for additional variables. This is 3 independent variables: one for the x-axis, one for the colorscale, and one for the faceting
+
+```{r Regression Visualization: Encodings}
+ggplot(data = train, aes(x = LSTAT, y = MEDV)) + 
+  geom_point(aes(color = RM)) + 
+  geom_smooth(method = "lm", se = F) + 
+  facet_wrap(vars(CHAS)) + theme_minimal()
+```
+
+From this implementation, I was interested in trying to cram as many variables into a single plot through various encodings as I could. The ggplot2 package in R is relatively strict to following the Grammar of Graphics framework, meaning while you can have lots of different scales, you can only have one of each unless you really hack it (meaning you can't do those kind-of terrible plots with two y-axes that people make in Excel a lot unless you try really hard because it wants to guide you to good visualization practices). So for these plots, I was experimenting with one variable to each encoding, meaning some variables had to be grouped in order to make them make sense for the encoding.
+
+```{r Regression Visualization: Encodings 2: Electric Boogaloo, or Absolute Nonsense}
+train.adj <- train
+train.adj$DIS.group <- cut(log(train.adj$DIS), 3)
+train.adj <- train.adj %>% 
+  mutate(DIS.group2 = as.factor(DIS.group),
+         DIS.group2 = if_else(DIS.group2 == "(0.12,0.872]", "first", 
+                              if_else(DIS.group2 == "(0.872,1.62]", "second", "third")))
+train.adj$PTR.group <- cut(train.adj$PTRATIO, 3)
+train.adj <- train.adj %>% 
+  mutate(PTR.group2 = as.factor(PTR.group),
+         PTR.group2 = if_else(PTR.group2 == "(12.6,15.7]", "first", 
+                              if_else(PTR.group2 == "(15.7,18.9]", "second", "third")))
+
+ggplot(data = train.adj, aes(x = LSTAT, y = MEDV)) + 
+  geom_point(aes(color = RM, shape = DIS.group2)) + 
+  geom_smooth(aes(group = DIS.group2, linetype = DIS.group2), method = "lm", se = F) + 
+  facet_wrap(vars(CHAS)) +
+  scale_color_distiller(palette = "Reds") + theme_minimal() + 
+  ggtitle("4 Independent Variables")
+
+ggplot(data = train.adj, aes(x = LSTAT, y = MEDV)) + 
+  geom_point(aes(color = RM, shape = DIS.group2, size = NOX)) + 
+  geom_smooth(aes(group = DIS.group2, linetype = DIS.group2), method = "lm", se = F) + 
+  facet_wrap(vars(CHAS)) +
+  scale_color_distiller(palette = "Reds") + theme_minimal() + 
+  ggtitle("5 Independent Variables")
+
+ggplot(data = train.adj, aes(x = LSTAT, y = MEDV)) + 
+  geom_point(aes(color = RM, shape = DIS.group2, size = NOX, alpha = B)) + 
+  geom_smooth(aes(group = DIS.group2, linetype = DIS.group2), method = "lm", se = F) + 
+  facet_wrap(vars(CHAS)) +
+  scale_color_distiller(palette = "Reds") + theme_minimal() + 
+  ggtitle("6 Independent Variables")
+
+ggplot(data = train.adj, aes(x = LSTAT, y = MEDV)) + 
+  geom_point(aes(color = RM, shape = DIS.group2, size = NOX, alpha = B)) + 
+  geom_smooth(aes(group = DIS.group2, linetype = DIS.group2), method = "lm", se = F) + 
+  facet_wrap(vars(CHAS, PTR.group)) +
+  scale_color_distiller(palette = "Reds") + theme_minimal() + 
+  ggtitle("7 Independent Variables")
+```
+
+So that's kind of a garbage plot, there's too much information, but I think it was a fun thought experiment nonetheless. With data with slightly more balanced (and senseable) categorical variables, there may be some potential for a (reduced) version of exploring some of these kinds of encodings. With this level of abstraction, you lose a lot of the specificity of something like a completely broken-out faceted-by-variable scatterplot, but you do retain the general gist with a lot of possible ways to compare. 
+
+###### **Surrogate Modeling**
+
+In order to train the surrogate model, I need my predictions attached to my data. I'm going to use the full dataset because the sample sizes are so small, so this includes the training and testing data, which is probably not ideal, but will work for this purpose well enough. 
+
+```{r Get Model Predictions}
+boston.pred <- boston.adj %>% mutate(pred = predict(RFModel, boston.adj))
+
+ggplot(data = boston.pred, aes(x = MEDV, y = pred)) + geom_point() + geom_line(aes(x = MEDV, y = MEDV)) + theme_minimal()
+cor(boston.pred$MEDV, boston.pred$pred)
+```
+
+To begin with the sample case and to provide a point of comparison to the MARS model, I made linear regressions surrogate models on the predictions. The coverage is pretty good, even with just a basic multiple linear regression with no interaction terms. 
+
+```{r Make Linear Regression Surrogates}
+surrModelFull <- lm(pred ~ .-id-MEDV-INDUS-AGE-TAX, data = boston.pred)
+summary(surrModelFull)
+
+surrModelFull.simple <- lm(pred ~ LSTAT, data = boston.pred)
+summary(surrModelFull.simple)
+ggplot(data = boston.pred, aes(x = LSTAT, y = pred)) + geom_point() + geom_smooth(method = "lm", se = F) + theme_minimal()
+
+boston.pred <- boston.pred %>% 
+  mutate(lmPred = predict(surrModelFull, boston.pred),
+         lmPred.simple = predict(surrModelFull.simple, boston.pred))
+
+ggplot(data = boston.pred, aes(x = MEDV, y = lmPred)) + geom_point() + geom_line(aes(x = MEDV, y = MEDV)) + theme_minimal()
+ggplot(data = boston.pred, aes(x = MEDV, y = lmPred.simple)) + geom_point() + geom_line(aes(x = MEDV, y = MEDV)) + theme_minimal()
+```
+
+But the MARS models are better. Because the data is small, but also because MARS models are generally fast to run, I can tune the model with a grid search and multiple levels of interaction terms. And this gives me a 0.93 $R^2$ with our complex final MARS model. I can also look at the most important parameters in the model, which align pretty closely with what I'd seen previously in the linear models. And I can get a broken-out plot of our MARS splines, which does help with the intuition and checking for the splines.
+
+```{r MARS}
+hyper_grid <- expand.grid(degree = 1:3,
+                          nprune = seq(2, 50, length.out = 10) %>%
+                            floor())
+
+set.seed(94856)
+marsModel <- train(
+  x = subset(boston.pred, select = -c(id, pred, MEDV, lmPred, lmPred.simple)),
+  y = boston.pred$pred,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid)
+
+marsModel$results
+marsModel$results %>%
+  filter(nprune==marsModel$bestTune$nprune, degree==marsModel$bestTune$degree)
+
+ggplot(marsModel) + theme_minimal()
+
+summary(marsModel)
+
+p1 <- vip(marsModel, num_features = 40, geom = "point", value = "gcv") + ggtitle("GCV") + theme_minimal()
+p2 <- vip(marsModel, num_features = 40, geom = "point", value = "rss") + ggtitle("RSS") + theme_minimal()
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+boston.pred <- boston.pred %>% 
+  mutate(marsPred = predict(marsModel, boston.pred))
+
+ggplot(data = boston.pred, aes(x = MEDV, y = marsPred)) + geom_point() + geom_line(aes(x = MEDV, y = MEDV)) + theme_minimal()
+ggplot(data = boston.pred, aes(x = LSTAT, y = marsPred)) + geom_point() + theme_minimal()
+
+# imp = varImp(marsModel) 
+# imp = imp$importance %>%
+#   as.data.frame() %>%
+#   mutate( variable = row.names(.) ) %>%
+#   filter( Overall > 0 )
+# plotmo(marsModel, all1 = T)
+```
+
+I also made a simple MARS model with only the same variable as the linear regression above, as a point of comparison, which is, of course, also substantially better.
+
+```{r Simple MARS}
+marsModel.simple <- train(
+  x = subset(boston.pred, select = LSTAT),
+  y = boston.pred$pred,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid)
+
+marsModel.simple$results %>%
+  filter(nprune==marsModel.simple$bestTune$nprune, degree==marsModel.simple$bestTune$degree)
+
+marsModel.simple$finalModel
+
+boston.pred <- boston.pred %>% 
+  mutate(marsPred.simple = predict(marsModel.simple, boston.pred))
+
+ggplot(data = boston.pred, aes(x = MEDV, y = marsPred.simple)) + geom_point() + geom_line(aes(x = MEDV, y = MEDV)) + theme_minimal()
+comp1 <- ggplot(data = boston.pred, aes(x = LSTAT, y = marsPred.simple)) + geom_point() + theme_minimal()
+comp2 <- ggplot(data = boston.pred, aes(x = LSTAT, y = MEDV)) + geom_point() + theme_minimal()
+gridExtra::grid.arrange(comp1, comp2, ncol = 2)
+```
+For reasons that I'll explain later, I'm also going to make a normalized version of all this data. So all the data will be scaled to be from 0 to 1 from whatever range it was previously in. This is going to be really useful for comparing between variables later.
+
+```{r Normalize Training Data}
+process.pred <- preProcess(as.data.frame(boston.pred), method=c("range"))
+boston.pred.norm <- bind_cols(predict(process.pred, as.data.frame(boston.pred)) %>% 
+                               select(-c(MEDV, id, pred, lmPred, lmPred.simple, marsPred)), boston.pred[14:19])
+
+marsModel.norm <- train(
+  x = subset(boston.pred.norm, select = -c(id,INDUS,AGE,TAX, MEDV, pred, lmPred, lmPred.simple, marsPred)),
+  y = boston.pred.norm$pred,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid)
+
+marsModel.norm$results %>%
+  filter(nprune==marsModel.norm$bestTune$nprune, degree==marsModel.norm$bestTune$degree)
+
+marsModel.norm$finalModel
+
+# ggplot(marsModel.norm)
+
+p1.marsnorm <- vip(marsModel.norm, num_features = 40, geom = "point", value = "gcv") + ggtitle("GCV") + theme_minimal()
+p2.marsnorm <- vip(marsModel.norm, num_features = 40, geom = "point", value = "rss") + ggtitle("RSS") + theme_minimal()
+gridExtra::grid.arrange(p1.marsnorm, p2.marsnorm, ncol = 2)
+
+terms <- marsModel.norm$finalModel$coefficients %>%
+  as.data.frame() %>%
+  mutate( parameter = row.names(.)) %>%
+  select( parameter, coef = y ) %>% 
+  mutate(spline = as.numeric(str_extract(parameter, "\\-?\\d*\\.\\d*")),
+         var = str_extract(parameter, "[A-Z]+"),
+         var = if_else(var == "I", "Intercept", var),
+         side = if_else(str_detect(parameter, "h\\(\\-?[0-9]"), "left",
+                        if_else(str_detect(parameter, "h\\([A-Z]"),"right","")),
+         weight = if_else(side == "left", spline, 
+                          if_else(side == "right", 1-spline, 0)),
+         weight = if_else(var == "DIS" & weight == 0.1347920, 0.0838145, weight),
+         weight = if_else(var == "CRIM" & weight == 0.9450162, 0.1653472, weight),
+         splineWeight = coef*weight)
+rownames(terms) <- NULL
+
+# imp = varImp(marsModel.norm) 
+# imp = imp$importance %>%
+#   as.data.frame() %>%
+#   mutate( variable = row.names(.) ) %>%
+#   filter( Overall > 0 )
+# 
+# plotmo(marsModel.norm, all1 = T) 
+```
+
+```{r Scale Training Data, evaluate = F, include = F}
+boston.pred.scale <- bind_cols(scale(boston.pred %>% 
+                                      select(-c(MEDV, id, pred, lmPred, lmPred.simple, marsPred))), boston.pred[14:19])
+
+marsModel.scale <- train(
+  x = subset(boston.pred.scale, select = -c(id,INDUS,AGE,TAX, MEDV, pred, lmPred, lmPred.simple, marsPred)),
+  y = boston.pred.scale$pred,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid)
+
+marsModel.scale$results %>%
+  filter(nprune==marsModel.scale$bestTune$nprune, degree==marsModel.scale$bestTune$degree)
+
+marsModel.scale$finalModel
+
+# ggplot(marsModel.scale)
+
+p1.marsscale <- vip(marsModel.scale, num_features = 40, geom = "point", value = "gcv") + ggtitle("GCV") + theme_minimal()
+p2.marsscale <- vip(marsModel.scale, num_features = 40, geom = "point", value = "rss") + ggtitle("RSS") + theme_minimal()
+gridExtra::grid.arrange(p1.marsscale, p2.marsscale, ncol = 2)
+
+terms <- marsModel.scale$finalModel$coefficients %>%
+  as.data.frame() %>%
+  mutate( parameter = row.names(.)) %>%
+  select( parameter, coef = y ) %>% 
+  mutate(spline = as.numeric(str_extract(parameter, "\\-?\\d*\\.\\d*")),
+         var = str_extract(parameter, "[A-Z]+"),
+         var = if_else(var == "I", "Intercept", var),
+         side = if_else(str_detect(parameter, "h\\(\\-?[0-9]"), "left",
+                        if_else(str_detect(parameter, "h\\([A-Z]"),"right","")),
+         weight = if_else(side == "left", spline, 
+                          if_else(side == "right", 1-spline, 0)),
+         weight = if_else(var == "DIS" & weight == 0.1347920, 0.0838145, weight),
+         weight = if_else(var == "CRIM" & weight == 0.9450162, 0.1653472, weight),
+         splineWeight = coef*weight)
+rownames(terms) <- NULL
+
+# imp = varImp(marsModel.scale) 
+# imp = imp$importance %>%
+#   as.data.frame() %>%
+#   mutate( variable = row.names(.) ) %>%
+#   filter( Overall > 0 )
+# 
+# plotmo(marsModel.scale, all1 = T) 
+```
+
+###### **Nomograms**
+
+The main package for creating nomograms is rms, which, as far as I could find, only lets nomograms be made with its functions, which is very frustrating. Its OLS function is the same as the `lm()` function in base R, so I'm going to use that for the proof of concept here. First, I'm showing a nomogram of a single value, which is very similar to the original nomograms for drawing between two values. Nomograms, like some of the other plots for evaluating ML techniques, also show the relationship between variables (as in positive and negative relationships) pretty plainly.
+
+```{r Simple LM Nomogram}
+OLSsegment <- ols(MEDV~LSTAT, data = train)
+OLSsegment$coefficients
+ddist <- datadist(train)
+options(datadist = "ddist")
+plot(nomogram(OLSsegment))
+OLSsegment
+```
+
+If you add another variable, you get something similar, but the total points scale begins to shift.
+
+```{r Simple LM Nomogram 2}
+OLSsegment2 <- ols(MEDV~LSTAT + RM, data = train)
+plot(nomogram(OLSsegment2))
+```
+
+```{r Full LM Nomograms}
+checktrain <- train %>% select(-c(id,INDUS,AGE,TAX))
+OLSfull <- ols(formula = MEDV~., data = checktrain)
+OLSfull$coefficients
+
+ddist <- datadist(checktrain)
+options(datadist = "ddist")
+plot(nomogram(OLSfull))
+```
+
+I also wanted to look at splines in nomograms, which rms supports. However, it doesn't support MARS implementation, so the actual method of putting together this nomogram will have to be somewhat hacked together.
+
+```{r Spline Nonograms}
+splineTest = ols(MEDV~lsp(LSTAT, 6) + RM, data = checktrain)
+splineTest
+plot(nomogram(splineTest))
+```
+
+We can also make a normalized nonogram, using the normalized data from above.
+
+```{r Nomogram of Normalized Surrogate Model}
+OLSfull.norm <- ols(pred~., data = boston.pred.norm %>% select(-c(id,INDUS,AGE,TAX,MEDV, lmPred, lmPred.simple, marsPred)))
+OLSfull.norm$coefficients
+ddist <- datadist(boston.pred.norm %>% select(-c(id,INDUS,AGE,TAX,MEDV,lmPred, lmPred.simple, marsPred)))
+options(datadist = "ddist")
+plot(nomogram(OLSfull.norm))
+OLSfull.norm
+
+# p1.olsnorm <- vip(OLSfull.norm, num_features = 20, geom = "point", value = "gcv") + ggtitle("GCV")
+# p2.olsnorm <- vip(OLSfull.norm, num_features = 20, geom = "point", value = "rss") + ggtitle("RSS")
+# gridExtra::grid.arrange(p1.olsnorm, p2.olsnorm, ncol = 2)
+```
+
+I'm going to approximate the MARS model using the spline functionality of the rms OLS function.
+
+```{r Spline Nonograms}
+splineTest = ols(MEDV~lsp(LSTAT, 6) + RM, data = checktrain)
+splineTest
+plot(nomogram(splineTest))
+```
+
+$y = 9.14 + \begin{cases} 72.95(0.13 - \text{LSTAT})\:\:\:\:\:\:\text{LSTAT} < 0.13,\\\\-16.27(\text{LSTAT}-0.13)\:\:\:\text{LSTAT} > 0.13;\end{cases} + \begin{cases} 72.95(0.13 - \text{LSTAT})\:\:\:\:\:\:\text{LSTAT} < 0.13,\\\\-16.27(\text{LSTAT}-0.13)\:\:\:\text{LSTAT} > 0.13;\end{cases}$
+
+I also created two visualizations that attempt to get at the interaction between spline points and their coefficients, due to the multiplicative and partial nature of these piecewise functions
+
+```{r Split Weighted Spline}
+ggplot(terms, aes(x = var, y = splineWeight)) + 
+  geom_segment(aes(x=var, xend=var, y=0, yend=splineWeight)) + 
+  geom_point(color = "coral", size = 3) + coord_flip() + theme_minimal()
+```
+
+```{r Split Spline Coefficients}
+ggplot(terms, aes(x = var, y = coef)) + 
+  geom_segment(aes(x=var, xend=var, y=0, yend=coef)) + 
+  geom_point(color = "coral", size = 3) + geom_hline(aes(yintercept = 0)) +  coord_flip() + theme_minimal()
+```
+
+_____________
+
+#### Results
+##### What are the results of applying your solution to the problem stated above?
+
+Many of my results can be found in the plots in the section above, but loosely summarized, there is a long way to go to making this methodology possible, in terms of building up the visualization space. Many of the existing tools are limited and somewhat counterintutive to use. More of this will be discussed in the next section.
+
+Beyond this, I think I was able to explore some more of the visualization space when it comes to not only visualizing MARS models but in exploring the regression visualization space more generally. There were some existing tool limitations, and also in the scale of this project, in terms of what I could build in a reasonable time frame.
+
+I think the scaling on the nomograms worked very effectively for MARS models, even if the visualization space was somewhat limited. It would be difficult to apply this kind of solution without explanation and acclimation to using the visualization, but I think a better and interactive interface for it could really help the functionality here.
+_____________
+
+#### Lessons Learned & Future Work
+##### What did you learn from this project? Anything surprising? How can this work be extended in the future?
+
+The current version that exists of dynamic nomograms are... not very reminiscent of the visualization tool of nomograms themselves. It shows the results, and through a combination of querying multiple different categories, you can get to something slightly closer to an actual nomogram, but not quite. 
+
+I would be interested in creating something that's closer to the functionality of an actual nomogram. One of the appeals of a nomogram as an interpretability tool is the way you can use the nomogram to **literally** complete the calculation, to a certain degree of accuracy. It is a visualization tool intended for calculation and intuitive interpretation.
+
+Additionally, the nomogram function currently doesn't work for more complicated kinds of splines, and specifcially the MARS technique that I've explored for this project. Here, the spline points were located with MARS through a separate modeling process, and then transferred to the nomogram function. Because I was using a pre-built function for the purposes of this project, I wasn't able to fully engineer a new implementation that would work with MARS or even other kinds of models beyond those implemented in the rms package. While rms is an extensive package with a substantial amount of modeling functionality, the nomogram function only works with models from the package, meaning that other kinds of models, such as MARS, can't be visualized with this function simply. 
+
+I would want to use the nomogram base as a way to implement MARS visually, the beginnings of which we can see from my previous visualizations, and also incorporate the interactive functionally mentioned above.
+
+_____________
